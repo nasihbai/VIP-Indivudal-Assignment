@@ -373,15 +373,15 @@ def main():
     base_output = "output"
     
     # Hazy images paths
-    hazy_raw = os.path.join(base_dataset, "01. Hazy - Raw")
-    hazy_gt = os.path.join(base_dataset, "01. Hazy - Enhanced (GT)")
-    hazy_enhanced = os.path.join(base_output, "hazy-student-enhanced")
+    hazy_raw = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\01. Hazy - Raw")
+    hazy_gt = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\01. Hazy - Enhanced (GT)")
+    hazy_enhanced = os.path.join(base_output, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\hazy-student-enhanced")
     hazy_viz = os.path.join(base_output, "visualizations", "hazy")
     
     # Low-light images paths
-    lowlight_raw = os.path.join(base_dataset, "02. Low Light - Raw")
-    lowlight_gt = os.path.join(base_dataset, "02. Low Light - Enhanced (GT)")
-    lowlight_enhanced = os.path.join(base_output, "lowlight-student-enhanced")
+    lowlight_raw = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\02. Low Light - Raw")
+    lowlight_gt = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\02. Low Light - Enhanced (GT)")
+    lowlight_enhanced = os.path.join(base_output, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\lowlight-student-enhanced")
     lowlight_viz = os.path.join(base_output, "visualizations", "lowlight")
     
     print("\n" + "="*60)

@@ -1,8 +1,8 @@
 # CDS6334 Visual Information Processing - Image Enhancement Assignment
 
 ## Student Information
-- **Name**: [Your Name]
-- **ID**: [Your Student ID]
+- **Name**: [Abdullah Nasih Ulwan Bin Md Baithori]
+- **ID**: [241UC2407F]
 - **Course**: CDS6334 Visual Information Processing
 - **Trimester**: 2530
 - **Assignment**: Individual Assignment (20%)
