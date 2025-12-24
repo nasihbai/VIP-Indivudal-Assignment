@@ -510,7 +510,7 @@ def main():
     enhancer = ImageEnhancer()
     
     # Define paths - ADJUST THESE TO YOUR DATASET LOCATION
-    base_input_path = "dataset"  # Adjust this to your dataset folder
+    base_input_path = r"C:\Users\muham\Documents\VIP Indivudal Assignment\Datset"
     base_output_path = "output"
     
     # Hazy images

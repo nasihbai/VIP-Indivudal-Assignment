@@ -331,33 +331,38 @@ class ImageEvaluator:
     def save_results_to_excel(self, output_path: str):
         """
         Save all results to an Excel file with multiple sheets.
-        
+
         Args:
             output_path: Path to save Excel file
         """
+        # Check if there are any results to save
+        if not self.results['hazy'] and not self.results['lowlight']:
+            print(f"\n⚠ No results to save. Skipping Excel file creation.")
+            return
+
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             # Hazy results
             if self.results['hazy']:
                 df_hazy = pd.DataFrame(self.results['hazy'])
                 df_hazy.to_excel(writer, sheet_name='Hazy_Details', index=False)
-                
+
                 summary_hazy = self.generate_summary_report(df_hazy, 'hazy')
-                pd.DataFrame([summary_hazy]).to_excel(writer, 
-                                                       sheet_name='Hazy_Summary', 
+                pd.DataFrame([summary_hazy]).to_excel(writer,
+                                                       sheet_name='Hazy_Summary',
                                                        index=False)
-            
+
             # Low-light results
             if self.results['lowlight']:
                 df_lowlight = pd.DataFrame(self.results['lowlight'])
-                df_lowlight.to_excel(writer, sheet_name='LowLight_Details', 
+                df_lowlight.to_excel(writer, sheet_name='LowLight_Details',
                                      index=False)
-                
-                summary_lowlight = self.generate_summary_report(df_lowlight, 
+
+                summary_lowlight = self.generate_summary_report(df_lowlight,
                                                                  'lowlight')
-                pd.DataFrame([summary_lowlight]).to_excel(writer, 
+                pd.DataFrame([summary_lowlight]).to_excel(writer,
                                                           sheet_name='LowLight_Summary',
                                                           index=False)
-        
+
         print(f"\n✓ Results saved to: {output_path}")
 
 
@@ -369,19 +374,19 @@ def main():
     evaluator = ImageEvaluator()
     
     # Define paths - ADJUST THESE TO YOUR FOLDER STRUCTURE
-    base_dataset = "dataset"
+    base_dataset = r"C:\Users\muham\Documents\VIP Indivudal Assignment\Datset"
     base_output = "output"
     
     # Hazy images paths
-    hazy_raw = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\01. Hazy - Raw")
-    hazy_gt = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\01. Hazy - Enhanced (GT)")
-    hazy_enhanced = os.path.join(base_output, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\hazy-student-enhanced")
+    hazy_raw = os.path.join(base_dataset, "01. Hazy - Raw")
+    hazy_gt = os.path.join(base_dataset, "01. Hazy - Enhanced (GT)")
+    hazy_enhanced = os.path.join(base_output, "hazy-student-enhanced")
     hazy_viz = os.path.join(base_output, "visualizations", "hazy")
     
     # Low-light images paths
-    lowlight_raw = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\02. Low Light - Raw")
-    lowlight_gt = os.path.join(base_dataset, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\02. Low Light - Enhanced (GT)")
-    lowlight_enhanced = os.path.join(base_output, "C:\\Users\\muham\\Documents\\VIP Indivudal Assignment\\Datset\\lowlight-student-enhanced")
+    lowlight_raw = os.path.join(base_dataset, "02. Low Light - Raw")
+    lowlight_gt = os.path.join(base_dataset, "02. Low Light - Enhanced (GT)")
+    lowlight_enhanced = os.path.join(base_output, "lowlight-student-enhanced")
     lowlight_viz = os.path.join(base_output, "visualizations", "lowlight")
     
     print("\n" + "="*60)
