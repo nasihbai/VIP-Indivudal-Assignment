@@ -93,7 +93,21 @@ dataset/
 ### Step 1: Run Image Enhancement
 
 
-Before running the image 
+## Before running the image enhancement project. 
+Make Sure to creat .venv 
+command:
+```bash
+python -m venv .venv
+```
+
+Activate environtment:
+Command:
+```bash
+source .venv/Sources/activate
+```
+
+## Then you are free to run
+
 ```bash
 python enhancement.py
 ```
