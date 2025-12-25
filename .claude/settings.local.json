@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(python enhancement.py:*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(del test_transmission.py)"
+    ]
+  }
+}

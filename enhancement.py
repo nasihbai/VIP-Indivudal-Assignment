@@ -13,6 +13,12 @@ import os
 from pathlib import Path
 from typing import Tuple, Optional
 import warnings
+from scipy.spatial import distance
+from scipy.ndimage import convolve
+from scipy.sparse import diags, csr_matrix
+from scipy.sparse.linalg import spsolve
+from utils import get_sparse_neighbor
+
 warnings.filterwarnings('ignore')
 
 
@@ -25,156 +31,205 @@ class ImageEnhancer:
     def __init__(self):
         """Initialize the ImageEnhancer with default parameters."""
         self.hazy_params = {
-            'omega': 0.95,  # Dehazing strength
-            'radius': 15,   # Dark channel radius
-            't0': 0.1,      # Minimum transmission
-            'guided_r': 60, # Guided filter radius
-            'guided_eps': 0.001  # Guided filter regularization
+            'omega': 0.95,         # Dehazing strength (amount of haze to remove, 0-1)
+            'radius': 15,          # Dark channel patch size (MUST match reference: 15)
+            't0': 0.1,             # Minimum transmission threshold
+            'guided_r': 20,        # Guided filter radius (soft matting)
+            'guided_eps': 0.01,    # Guided filter regularization (10e-3)
+            'color_mode': 'LAB',   # Color enhancement: 'LAB', 'YUV', or 'BOTH'
+            'adaptive': True,      # Enable adaptive parameter tuning per image
+            'saturation_scale': 0.9  # Saturation multiplier (0-2: <1 reduces, >1 increases, 1=unchanged)
         }
         
         self.lowlight_params = {
-            'gamma': 1.5,   # Gamma correction
-            'alpha': 1.3,   # Contrast enhancement
-            'beta': 10,     # Brightness adjustment
-            'clahe_clip': 2.5,  # CLAHE clip limit
-            'clahe_grid': (8, 8)  # CLAHE grid size
+            'gamma': 0.55,     # Gamma correction for illumination refinement (lower = brighter)
+            'lambda_': 0.15,   # Balance coefficient for optimization
+            'sigma': 3,        # Spatial standard deviation for Gaussian weights
+            'dual': True,      # Use DUAL method (True) or LIME method (False)
+            'bc': 1,           # Mertens contrast measure weight
+            'bs': 1,           # Mertens saturation measure weight
+            'be': 1,           # Mertens well-exposedness measure weight
+            'eps': 1e-3,       # Small constant for stability
+            'post_gamma': 1.35,  # Post-processing brightness boost
+            'denoise': False,  # Disabled - filtering doesn't help
+            'median_kernel': 5,  # Median filter kernel size (3, 5, or 7)
+            'bilateral_d': 9,    # Bilateral filter diameter
+            'bilateral_sigma': 10  # Bilateral filter sigma
         }
     
     # ==================== HAZY IMAGE ENHANCEMENT ====================
     
     def enhance_hazy_image(self, image: np.ndarray) -> np.ndarray:
         """
-        Enhance a hazy image using Dark Channel Prior-based dehazing.
-        
-        This method implements a simplified version of the Dark Channel Prior
-        algorithm combined with guided filtering for refined transmission estimation.
-        
+        Enhance a hazy image using adaptive Dark Channel Prior with guided filtering.
+
+        This method implements the complete Dark Channel Prior algorithm with:
+        1. Adaptive parameter selection based on haze level (optional)
+        2. Dark channel prior computation
+        3. Atmospheric light estimation
+        4. Transmission map estimation
+        5. Guided filter refinement (soft matting)
+        6. Scene radiance recovery
+        7. Flexible color enhancement (LAB/YUV/Both)
+        8. Saturation adjustment (reduces oversaturation)
+
         Args:
             image: Input hazy image (BGR format)
-            
+
         Returns:
             Enhanced dehazed image
         """
-        # Normalize image to [0, 1]
-        img_normalized = image.astype(np.float64) / 255.0
-        
-        # Step 1: Estimate atmospheric light
-        atmospheric_light = self._estimate_atmospheric_light(img_normalized)
-        
-        # Step 2: Compute dark channel
-        dark_channel = self._get_dark_channel(img_normalized, 
-                                               self.hazy_params['radius'])
-        
+        # Step 0: Adaptive parameter tuning (if enabled)
+        if self.hazy_params['adaptive']:
+            params = self._adapt_hazy_parameters(image)
+        else:
+            params = self.hazy_params.copy()
+
+        # Step 1: Compute dark channel
+        dark_channel = self._compute_dark_channel_optimized(
+            image,
+            params['radius']
+        )
+
+        # Step 2: Estimate atmospheric light
+        atmospheric_light = self._estimate_atmospheric_light_optimized(
+            image,
+            dark_channel,
+            topPercent=0.001
+        )
+
         # Step 3: Estimate transmission map
-        transmission = self._estimate_transmission(img_normalized, 
-                                                     atmospheric_light, 
-                                                     dark_channel)
-        
-        # Step 4: Refine transmission using guided filter
-        transmission_refined = self._guided_filter(img_normalized[:, :, 0], 
-                                                     transmission,
-                                                     self.hazy_params['guided_r'],
-                                                     self.hazy_params['guided_eps'])
-        
-        # Step 5: Recover scene radiance (dehaze)
-        dehazed = self._recover_scene_radiance(img_normalized, 
-                                                 transmission_refined, 
-                                                 atmospheric_light)
-        
-        # Step 6: Post-processing enhancement
-        dehazed = self._post_process_hazy(dehazed)
-        
-        # Convert back to uint8
-        result = np.clip(dehazed * 255, 0, 255).astype(np.uint8)
-        
-        return result
+        transmission_map = self._estimate_transmission_optimized(
+            image,
+            atmospheric_light,
+            params['omega'],
+            params['radius']
+        )
+
+        # Step 4: Refine transmission using guided filter (soft matting)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        refined_transmission = self._guided_filter(
+            gray,
+            transmission_map,
+            params['guided_r'],
+            params['guided_eps']
+        )
+
+        # Step 5: Recover scene radiance
+        radiance_map = self._recover_radiance_optimized(
+            image,
+            atmospheric_light,
+            refined_transmission,
+            params['t0']
+        )
+
+        # Step 6: Color enhancement (LAB, YUV, or both)
+        enhanced = self._apply_color_enhancement(radiance_map, params['color_mode'])
+
+        # Step 7: Adjust saturation (if scale != 1.0)
+        if params['saturation_scale'] != 1.0:
+            enhanced = self._adjust_saturation(enhanced, params['saturation_scale'])
+
+        return enhanced
     
-    def _get_dark_channel(self, image: np.ndarray, radius: int) -> np.ndarray:
+    def _compute_dark_channel_optimized(self, image: np.ndarray, patchSize: int) -> np.ndarray:
         """
-        Compute the dark channel of an image.
-        
-        The dark channel is defined as the minimum pixel value in each color channel
-        within a local patch.
-        
+        Compute the dark channel prior (OPTIMIZED - vectorized).
+
         Args:
-            image: Input image (normalized to [0, 1])
-            radius: Patch radius
-            
+            image: Input image (BGR, uint8 or float32)
+            patchSize: Patch size for local minimum
+
         Returns:
-            Dark channel map
+            Dark channel map (float32)
         """
-        # Get minimum across color channels
-        min_channel = np.min(image, axis=2)
-        
-        # Apply minimum filter (erosion)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (radius, radius))
-        dark_channel = cv2.erode(min_channel, kernel)
-        
+        # Convert to float32 if needed
+        if image.dtype == np.uint8:
+            img_float = image.astype(np.float32)
+        else:
+            img_float = image
+
+        height, width = img_float.shape[:2]
+
+        # Step 1: Compute minimum across color channels for each pixel
+        min_channels = np.min(img_float, axis=2)
+
+        # Step 2: Apply minimum filter over local patches
+        pad = patchSize // 2
+        padded = np.pad(min_channels, ((pad, pad), (pad, pad)), mode='edge')
+
+        dark_channel = np.zeros((height, width), dtype=np.float32)
+        for i in range(height):
+            for j in range(width):
+                patch = padded[i:i + patchSize, j:j + patchSize]
+                dark_channel[i, j] = np.min(patch)
+
         return dark_channel
     
-    def _estimate_atmospheric_light(self, image: np.ndarray, 
-                                     top_percent: float = 0.001) -> np.ndarray:
+    def _estimate_atmospheric_light_optimized(self, image: np.ndarray,
+                                              dark_channel: np.ndarray,
+                                              topPercent: float = 0.001) -> np.ndarray:
         """
-        Estimate atmospheric light from the haziest region.
-        
+        Estimate atmospheric light (OPTIMIZED).
+
         Args:
-            image: Input image (normalized)
-            top_percent: Percentage of brightest pixels to consider
-            
+            image: Input image (BGR, uint8)
+            dark_channel: Dark channel prior
+            topPercent: Top percentage of brightest pixels
+
         Returns:
-            Atmospheric light value (3-channel)
+            Atmospheric light (3-channel array)
         """
-        # Get dark channel
-        dark_channel = self._get_dark_channel(image, 15)
-        
-        # Find top brightest pixels in dark channel
-        num_pixels = int(dark_channel.size * top_percent)
+        height, width = image.shape[:2]
+        flat_img = image.reshape(height * width, 3)
         flat_dark = dark_channel.flatten()
-        indices = np.argpartition(flat_dark, -num_pixels)[-num_pixels:]
-        
-        # Get corresponding pixels in original image
-        h, w = dark_channel.shape
-        indices_2d = np.unravel_index(indices, (h, w))
-        
-        # Find pixel with maximum intensity among top bright pixels
-        atmospheric_light = np.zeros(3)
-        max_intensity = 0
-        
-        for i in range(len(indices)):
-            y, x = indices_2d[0][i], indices_2d[1][i]
-            intensity = np.sum(image[y, x, :])
-            if intensity > max_intensity:
-                max_intensity = intensity
-                atmospheric_light = image[y, x, :]
-        
+
+        # Get top percent brightest pixels in dark channel
+        num_pixels = int(height * width * topPercent)
+        sorted_indices = np.argsort(-flat_dark)  # Sort in descending order
+        top_indices = sorted_indices[:num_pixels]
+
+        # Find max intensity for each channel
+        atmospheric_light = np.zeros(3, dtype=np.float32)
+        for idx in top_indices:
+            pixel = flat_img[idx]
+            for c in range(3):
+                if pixel[c] > atmospheric_light[c]:
+                    atmospheric_light[c] = pixel[c]
+
         return atmospheric_light
     
-    def _estimate_transmission(self, image: np.ndarray, 
-                                atmospheric_light: np.ndarray,
-                                dark_channel: np.ndarray) -> np.ndarray:
+    def _estimate_transmission_optimized(self, image: np.ndarray,
+                                         atmospheric_light: np.ndarray,
+                                         omega: float,
+                                         patchSize: int) -> np.ndarray:
         """
-        Estimate transmission map using dark channel prior.
-        
+        Estimate transmission map (OPTIMIZED).
+
         Args:
-            image: Input image
-            atmospheric_light: Estimated atmospheric light
-            dark_channel: Pre-computed dark channel
-            
+            image: Input image (BGR, uint8)
+            atmospheric_light: Atmospheric light
+            omega: Parameter (0-1) for haze retention
+            patchSize: Patch size
+
         Returns:
-            Transmission map
+            Transmission map (float32)
         """
-        omega = self.hazy_params['omega']
-        
-        # Normalize by atmospheric light
-        normalized = np.zeros_like(image)
-        for i in range(3):
-            normalized[:, :, i] = image[:, :, i] / atmospheric_light[i]
-        
-        # Compute transmission
-        transmission = 1 - omega * self._get_dark_channel(normalized, 
-                                                           self.hazy_params['radius'])
-        
-        return transmission
+        # Normalize image by atmospheric light to range [0, 1]
+        normalized_img = image.astype(np.float32) / (atmospheric_light + 1e-6)
+
+        # Compute dark channel of normalized image (stays in float32)
+        dark_channel = self._compute_dark_channel_optimized(
+            normalized_img,
+            patchSize
+        )
+
+        # Transmission estimation (eq. 12 from paper)
+        # dark_channel is already in [0, 1] range since normalized_img is [0, 1]
+        transmission_map = 1 - omega * dark_channel
+        transmission_map = transmission_map.astype(np.float32)
+
+        return transmission_map
     
     def _guided_filter(self, guide: np.ndarray, src: np.ndarray, 
                        radius: int, eps: float) -> np.ndarray:
@@ -206,188 +261,499 @@ class ImageEnhancer:
         
         return mean_a * guide + mean_b
     
-    def _recover_scene_radiance(self, image: np.ndarray, 
-                                 transmission: np.ndarray,
-                                 atmospheric_light: np.ndarray) -> np.ndarray:
+    def _recover_radiance_optimized(self, image: np.ndarray,
+                                    atmospheric_light: np.ndarray,
+                                    transmission: np.ndarray,
+                                    t0: float) -> np.ndarray:
         """
-        Recover the scene radiance (dehaze the image).
-        
+        Recover scene radiance (OPTIMIZED).
+
+        Args:
+            image: Input hazy image (BGR, uint8)
+            atmospheric_light: Atmospheric light
+            transmission: Refined transmission map
+            t0: Minimum transmission threshold
+
+        Returns:
+            Dehazed image (uint8)
+        """
+        height, width = transmission.shape
+        num_channels = image.shape[2]
+
+        # Clip transmission to avoid division by zero
+        transmission_clipped = np.clip(transmission, t0, 1.0)
+
+        # Expand transmission to 3 channels
+        transmission_3d = np.zeros_like(image, dtype=np.float32)
+        for c in range(num_channels):
+            transmission_3d[:, :, c] = transmission_clipped
+
+        # Recover radiance: J(x) = (I(x) - A) / t(x) + A
+        radiance = (image.astype(np.float32) - atmospheric_light) / transmission_3d + atmospheric_light
+
+        # Clip to valid range
+        radiance = np.clip(radiance, 0, 255).astype(np.uint8)
+
+        return radiance
+    
+    def _detect_haze_level(self, image: np.ndarray, dark_channel: np.ndarray = None) -> float:
+        """
+        Detect the haze level in an image.
+
+        Args:
+            image: Input image (BGR, uint8)
+            dark_channel: Pre-computed dark channel (optional)
+
+        Returns:
+            Haze level (0-1, higher = more haze)
+        """
+        if dark_channel is None:
+            dark_channel = self._compute_dark_channel_optimized(image, 15)
+
+        # Haze level is estimated by average dark channel value
+        # Low dark channel = high haze
+        avg_dark = np.mean(dark_channel) / 255.0
+        haze_level = 1.0 - avg_dark
+
+        return haze_level
+
+    def _adapt_hazy_parameters(self, image: np.ndarray) -> dict:
+        """
+        Adaptively tune parameters based on image haze level.
+
         Args:
             image: Input hazy image
-            transmission: Transmission map
-            atmospheric_light: Atmospheric light
-            
+
         Returns:
-            Dehazed image
+            Adapted parameters dictionary
         """
-        t0 = self.hazy_params['t0']
-        
-        # Ensure minimum transmission
-        transmission = np.maximum(transmission, t0)
-        
-        # Recover radiance
-        result = np.zeros_like(image)
-        for i in range(3):
-            result[:, :, i] = (image[:, :, i] - atmospheric_light[i]) / \
-                              transmission + atmospheric_light[i]
-        
-        return result
-    
-    def _post_process_hazy(self, image: np.ndarray) -> np.ndarray:
+        params = self.hazy_params.copy()
+
+        # Detect haze level
+        dark_channel = self._compute_dark_channel_optimized(image, 15)
+        haze_level = self._detect_haze_level(image, dark_channel)
+
+        # Adapt parameters based on haze level
+        if haze_level > 0.7:  # Heavy haze
+            params['omega'] = 0.98
+            params['guided_r'] = 25
+            params['guided_eps'] = 0.02
+        elif haze_level > 0.5:  # Moderate haze
+            params['omega'] = 0.95
+            params['guided_r'] = 20
+            params['guided_eps'] = 0.01
+        else:  # Light haze
+            params['omega'] = 0.90
+            params['guided_r'] = 15
+            params['guided_eps'] = 0.005
+
+        return params
+
+    def _enhance_lab_color(self, image: np.ndarray) -> np.ndarray:
         """
-        Post-process dehazed image for better visual quality.
-        
+        Enhance image using LAB color space with histogram equalization.
+
         Args:
-            image: Dehazed image
-            
+            image: Input image (BGR, uint8)
+
         Returns:
-            Enhanced image
+            Enhanced image (uint8)
         """
-        # Clip values
-        image = np.clip(image, 0, 1)
-        
-        # Convert to uint8 for CLAHE
-        img_uint8 = (image * 255).astype(np.uint8)
-        
-        # Apply CLAHE for contrast enhancement
-        lab = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
-        
-        lab = cv2.merge([l, a, b])
-        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        
-        # Convert back to float
-        enhanced = enhanced.astype(np.float64) / 255.0
-        
-        # Slight sharpening
-        enhanced = self._apply_sharpening(enhanced, strength=0.5)
-        
+        # Convert to LAB color space
+        lab_img = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+
+        # Apply histogram equalization to L channel
+        lab_img[:, :, 0] = cv2.equalizeHist(lab_img[:, :, 0])
+
+        # Convert back to BGR
+        enhanced = cv2.cvtColor(lab_img, cv2.COLOR_LAB2BGR)
+
         return enhanced
-    
+
+    def _enhance_yuv_color(self, image: np.ndarray) -> np.ndarray:
+        """
+        Enhance image using YUV color space with histogram equalization.
+
+        Args:
+            image: Input image (BGR, uint8)
+
+        Returns:
+            Enhanced image (uint8)
+        """
+        # Convert to YUV color space
+        yuv_img = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
+
+        # Apply histogram equalization to Y channel (luminance)
+        yuv_img[:, :, 0] = cv2.equalizeHist(yuv_img[:, :, 0])
+
+        # Convert back to BGR
+        enhanced = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR)
+
+        return enhanced
+
+    def _apply_color_enhancement(self, image: np.ndarray, mode: str = 'LAB') -> np.ndarray:
+        """
+        Apply color enhancement based on selected mode.
+
+        Args:
+            image: Input image (BGR, uint8)
+            mode: Enhancement mode ('LAB', 'YUV', or 'BOTH')
+
+        Returns:
+            Enhanced image (uint8)
+        """
+        if mode == 'LAB':
+            return self._enhance_lab_color(image)
+        elif mode == 'YUV':
+            return self._enhance_yuv_color(image)
+        elif mode == 'BOTH':
+            # Apply both and blend
+            lab_enhanced = self._enhance_lab_color(image)
+            yuv_enhanced = self._enhance_yuv_color(image)
+            # Weighted blend (60% LAB, 40% YUV)
+            blended = cv2.addWeighted(lab_enhanced, 0.6, yuv_enhanced, 0.4, 0)
+            return blended
+        else:
+            # Default to LAB
+            return self._enhance_lab_color(image)
+
+    def _adjust_saturation(self, image: np.ndarray, scale: float) -> np.ndarray:
+        """
+        Adjust color saturation in HSV color space.
+
+        Args:
+            image: Input image (BGR, uint8)
+            scale: Saturation multiplier (0-2)
+                   < 1.0 = reduce saturation (more grayscale)
+                   = 1.0 = no change
+                   > 1.0 = increase saturation (more vibrant)
+
+        Returns:
+            Image with adjusted saturation (uint8)
+        """
+        # Convert BGR to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+        # Adjust saturation (S channel)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * scale, 0, 255)
+
+        # Convert back to BGR
+        hsv = hsv.astype(np.uint8)
+        adjusted = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        return adjusted
+
     # ==================== LOW-LIGHT IMAGE ENHANCEMENT ====================
-    
+    # Using DUAL/LIME Method (Retinex-based illumination correction)
+
     def enhance_lowlight_image(self, image: np.ndarray) -> np.ndarray:
         """
-        Enhance a low-light image using multiple traditional techniques.
-        
-        This method combines:
-        1. Adaptive histogram equalization (CLAHE)
-        2. Gamma correction
-        3. Bilateral filtering for noise reduction
-        4. Color correction
-        5. Sharpening
-        
+        Enhance a low-light image using DUAL or LIME method with adaptive parameters.
+
+        This method implements the Retinex-based approach with:
+        1. Automatic brightness level detection
+        2. Adaptive parameter selection based on image darkness
+        3. Illumination map estimation and refinement
+        4. Multi-exposure fusion (DUAL) or simple correction (LIME)
+
         Args:
             image: Input low-light image (BGR format)
-            
+
         Returns:
             Enhanced bright image
         """
-        # Step 1: Convert to LAB color space for better processing
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        # Step 2: Apply CLAHE to L channel
-        clahe = cv2.createCLAHE(clipLimit=self.lowlight_params['clahe_clip'],
-                                tileGridSize=self.lowlight_params['clahe_grid'])
-        l_enhanced = clahe.apply(l)
-        
-        # Merge back
-        lab_enhanced = cv2.merge([l_enhanced, a, b])
-        enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
-        
-        # Step 3: Apply gamma correction for brightness
-        enhanced = self._apply_gamma_correction(enhanced, 
-                                                 self.lowlight_params['gamma'])
-        
-        # Step 4: Bilateral filter for noise reduction while preserving edges
-        enhanced = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
-        
-        # Step 5: Enhance contrast
-        enhanced = self._enhance_contrast(enhanced,
-                                          alpha=self.lowlight_params['alpha'],
-                                          beta=self.lowlight_params['beta'])
-        
-        # Step 6: Color correction to restore natural colors
-        enhanced = self._correct_color_cast(enhanced)
-        
-        # Step 7: Apply sharpening
-        enhanced = self._apply_sharpening(enhanced, strength=0.8)
-        
-        # Step 8: Final normalization
-        enhanced = np.clip(enhanced, 0, 255).astype(np.uint8)
-        
+        # Use DUAL/LIME enhancement
+        enhanced = self._enhance_image_exposure(
+            image,
+            gamma=self.lowlight_params['gamma'],
+            lambda_=self.lowlight_params['lambda_'],
+            dual=self.lowlight_params['dual'],
+            sigma=self.lowlight_params['sigma'],
+            bc=self.lowlight_params['bc'],
+            bs=self.lowlight_params['bs'],
+            be=self.lowlight_params['be'],
+            eps=self.lowlight_params['eps']
+        )
+
+        # Apply uniform post-processing brightness boost
+        enhanced = self._apply_post_gamma(enhanced, self.lowlight_params['post_gamma'])
+
+        # Apply adaptive noise reduction if enabled
+        if self.lowlight_params['denoise']:
+            enhanced = self._adaptive_noise_reduction(
+                enhanced,
+                median_kernel=self.lowlight_params['median_kernel'],
+                bilateral_d=self.lowlight_params['bilateral_d'],
+                bilateral_sigma=self.lowlight_params['bilateral_sigma']
+            )
+
         return enhanced
-    
-    def _apply_gamma_correction(self, image: np.ndarray, 
-                                 gamma: float) -> np.ndarray:
+
+    def _apply_post_gamma(self, image: np.ndarray, gamma: float) -> np.ndarray:
         """
-        Apply gamma correction to adjust brightness.
-        
+        Apply gamma correction as post-processing.
+
         Args:
-            image: Input image
+            image: Input image (uint8)
             gamma: Gamma value (>1 brightens, <1 darkens)
-            
+
         Returns:
             Gamma-corrected image
         """
-        # Build lookup table
-        inv_gamma = 1.0 / gamma
-        table = np.array([((i / 255.0) ** inv_gamma) * 255 
-                         for i in range(256)]).astype(np.uint8)
-        
-        # Apply lookup table
-        return cv2.LUT(image, table)
-    
-    def _enhance_contrast(self, image: np.ndarray, 
-                          alpha: float = 1.3, 
-                          beta: int = 10) -> np.ndarray:
+        # Normalize to [0, 1]
+        img_normalized = image.astype(np.float32) / 255.0
+
+        # Apply gamma correction
+        corrected = np.power(img_normalized, 1.0 / gamma)
+
+        # Convert back to uint8
+        return np.clip(corrected * 255, 0, 255).astype(np.uint8)
+
+    def _estimate_noise_level(self, image: np.ndarray) -> float:
         """
-        Enhance contrast using linear transformation.
-        
+        Estimate noise level in the image using Laplacian variance method.
+
         Args:
-            image: Input image
-            alpha: Contrast control (1.0-3.0)
-            beta: Brightness control
-            
+            image: Input image (uint8)
+
         Returns:
-            Contrast-enhanced image
+            Noise estimate (higher = more noise)
         """
-        adjusted = cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
-        return adjusted
-    
-    def _correct_color_cast(self, image: np.ndarray) -> np.ndarray:
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+
+        # Compute Laplacian variance (edge detection)
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        variance = laplacian.var()
+
+        return variance
+
+    def _adaptive_noise_reduction(self, image: np.ndarray, median_kernel: int = 5,
+                                  bilateral_d: int = 9, bilateral_sigma: int = 75) -> np.ndarray:
         """
-        Correct color cast using Gray World assumption.
-        
+        Apply adaptive noise reduction with median and bilateral filtering.
+
+        This method:
+        1. Uses median filter to remove salt & pepper noise
+        2. Applies bilateral filter to reduce noise while preserving edges
+        3. Blends with original to maintain sharpness
+
         Args:
-            image: Input image
-            
+            image: Input image (uint8)
+            median_kernel: Kernel size for median filter (3, 5, or 7)
+            bilateral_d: Bilateral filter diameter
+            bilateral_sigma: Bilateral filter sigma for color and space
+
         Returns:
-            Color-corrected image
+            Denoised image
         """
-        result = image.astype(np.float64)
-        
-        # Calculate mean of each channel
-        avg_b = np.mean(result[:, :, 0])
-        avg_g = np.mean(result[:, :, 1])
-        avg_r = np.mean(result[:, :, 2])
-        
-        # Calculate gray reference
-        avg_gray = (avg_b + avg_g + avg_r) / 3
-        
-        # Scale each channel
-        if avg_b > 0:
-            result[:, :, 0] = result[:, :, 0] * (avg_gray / avg_b)
-        if avg_g > 0:
-            result[:, :, 1] = result[:, :, 1] * (avg_gray / avg_g)
-        if avg_r > 0:
-            result[:, :, 2] = result[:, :, 2] * (avg_gray / avg_r)
-        
-        return np.clip(result, 0, 255).astype(np.uint8)
+        # Step 1: Median filter for salt & pepper noise
+        # Higher kernel = more noise removal but potential blur
+        median_filtered = cv2.medianBlur(image, median_kernel)
+
+        # Step 2: Bilateral filter for edge-preserving smoothing
+        # This maintains sharp edges while reducing noise in smooth areas
+        bilateral_filtered = cv2.bilateralFilter(
+            median_filtered,
+            d=bilateral_d,
+            sigmaColor=bilateral_sigma,
+            sigmaSpace=bilateral_sigma
+        )
+
+        # Step 3: Adaptive blending based on noise level
+        noise_level = self._estimate_noise_level(image)
+
+        # If noise is high, use more filtering; if low, preserve original
+        if noise_level < 100:  # Low noise
+            alpha = 0.3  # 30% filtered, 70% original
+        elif noise_level < 500:  # Medium noise
+            alpha = 0.6  # 60% filtered, 40% original
+        else:  # High noise
+            alpha = 0.85  # 85% filtered, 15% original
+
+        # Blend filtered and original for sharpness preservation
+        denoised = cv2.addWeighted(bilateral_filtered, alpha, image, 1 - alpha, 0)
+
+        return denoised.astype(np.uint8)
+
+    def _create_spacial_affinity_kernel(self, spatial_sigma: float, size: int = 15) -> np.ndarray:
+        """
+        Create a kernel (size * size matrix) for spatial affinity based Gaussian weights.
+
+        Args:
+            spatial_sigma: Spatial standard deviation
+            size: Size of the kernel
+
+        Returns:
+            Kernel matrix
+        """
+        kernel = np.zeros((size, size))
+        for i in range(size):
+            for j in range(size):
+                kernel[i, j] = np.exp(-0.5 * (distance.euclidean((i, j), (size // 2, size // 2)) ** 2) / (spatial_sigma ** 2))
+
+        return kernel
+
+    def _compute_smoothness_weights(self, L: np.ndarray, x: int, kernel: np.ndarray, eps: float = 1e-3) -> np.ndarray:
+        """
+        Compute smoothness weights for illumination map refinement.
+
+        Args:
+            L: Initial illumination map
+            x: Direction (1 for horizontal, 0 for vertical)
+            kernel: Spatial affinity matrix
+            eps: Small constant for stability
+
+        Returns:
+            Smoothness weights
+        """
+        Lp = cv2.Sobel(L, cv2.CV_64F, int(x == 1), int(x == 0), ksize=1)
+        T = convolve(np.ones_like(L), kernel, mode='constant')
+        T = T / (np.abs(convolve(Lp, kernel, mode='constant')) + eps)
+        return T / (np.abs(Lp) + eps)
+
+    def _refine_illumination_map_linear(self, L: np.ndarray, gamma: float,
+                                        lambda_: float, kernel: np.ndarray,
+                                        eps: float = 1e-3) -> np.ndarray:
+        """
+        Refine illumination map using optimization (LIME method).
+
+        Args:
+            L: Initial illumination map
+            gamma: Gamma correction factor
+            lambda_: Balance coefficient
+            kernel: Spatial affinity matrix
+            eps: Small constant for stability
+
+        Returns:
+            Refined illumination map
+        """
+        # Compute smoothness weights
+        wx = self._compute_smoothness_weights(L, x=1, kernel=kernel, eps=eps)
+        wy = self._compute_smoothness_weights(L, x=0, kernel=kernel, eps=eps)
+
+        n, m = L.shape
+        L_1d = L.copy().flatten()
+
+        # Compute five-point spatially inhomogeneous Laplacian matrix
+        row, column, data = [], [], []
+        for p in range(n * m):
+            diag = 0
+            for q, (k, l, x) in get_sparse_neighbor(p, n, m).items():
+                weight = wx[k, l] if x else wy[k, l]
+                row.append(p)
+                column.append(q)
+                data.append(-weight)
+                diag += weight
+            row.append(p)
+            column.append(p)
+            data.append(diag)
+        F = csr_matrix((data, (row, column)), shape=(n * m, n * m))
+
+        # Solve linear system
+        Id = diags([np.ones(n * m)], [0])
+        A = Id + lambda_ * F
+        L_refined = spsolve(csr_matrix(A), L_1d, permc_spec=None, use_umfpack=True).reshape((n, m))
+
+        # Gamma correction
+        L_refined = np.clip(L_refined, eps, 1) ** gamma
+
+        return L_refined
+
+    def _correct_underexposure(self, im: np.ndarray, gamma: float,
+                               lambda_: float, kernel: np.ndarray,
+                               eps: float = 1e-3) -> np.ndarray:
+        """
+        Correct underexposure using Retinex-based algorithm.
+
+        Args:
+            im: Input image (normalized)
+            gamma: Gamma correction factor
+            lambda_: Balance coefficient
+            kernel: Spatial affinity matrix
+            eps: Small constant for stability
+
+        Returns:
+            Corrected image
+        """
+        # Initial illumination map estimation
+        L = np.max(im, axis=-1)
+
+        # Refine illumination map
+        L_refined = self._refine_illumination_map_linear(L, gamma, lambda_, kernel, eps)
+
+        # Correct underexposure
+        L_refined_3d = np.repeat(L_refined[..., None], 3, axis=-1)
+        im_corrected = im / L_refined_3d
+
+        return im_corrected
+
+    def _fuse_multi_exposure_images(self, im: np.ndarray, under_ex: np.ndarray,
+                                    over_ex: np.ndarray, bc: float = 1,
+                                    bs: float = 1, be: float = 1.5) -> np.ndarray:
+        """
+        Fuse multi-exposure images using Mertens method (DUAL).
+
+        Args:
+            im: Original image
+            under_ex: Under-exposure corrected image
+            over_ex: Over-exposure corrected image
+            bc: Contrast measure weight
+            bs: Saturation measure weight
+            be: Well-exposedness measure weight
+
+        Returns:
+            Fused image
+        """
+        merge_mertens = cv2.createMergeMertens(bc, bs, be)
+        images = [np.clip(x * 255, 0, 255).astype("uint8") for x in [im, under_ex, over_ex]]
+        fused_images = merge_mertens.process(images)
+        return fused_images
+
+    def _enhance_image_exposure(self, im: np.ndarray, gamma: float, lambda_: float,
+                                dual: bool = True, sigma: int = 3, bc: float = 1,
+                                bs: float = 1, be: float = 1.5, eps: float = 1e-3) -> np.ndarray:
+        """
+        Main enhancement function using DUAL or LIME method.
+
+        Args:
+            im: Input image
+            gamma: Gamma correction factor
+            lambda_: Balance coefficient
+            dual: Use DUAL (True) or LIME (False)
+            sigma: Spatial standard deviation
+            bc: Contrast measure weight
+            bs: Saturation measure weight
+            be: Well-exposedness measure weight
+            eps: Small constant for stability
+
+        Returns:
+            Enhanced image
+        """
+        # Create spatial affinity kernel
+        kernel = self._create_spacial_affinity_kernel(sigma)
+
+        # Normalize image
+        im_normalized = im.astype(float) / 255.0
+
+        # Correct underexposure
+        under_corrected = self._correct_underexposure(im_normalized, gamma, lambda_, kernel, eps)
+
+        if dual:
+            # DUAL method: also correct overexposure and fuse
+            inv_im_normalized = 1 - im_normalized
+            over_corrected = 1 - self._correct_underexposure(inv_im_normalized, gamma, lambda_, kernel, eps)
+            # Fuse images
+            im_corrected = self._fuse_multi_exposure_images(im_normalized, under_corrected, over_corrected, bc, bs, be)
+        else:
+            # LIME method: only underexposure correction
+            im_corrected = under_corrected
+
+        # Convert back to uint8
+        return np.clip(im_corrected * 255, 0, 255).astype("uint8")
     
     def _apply_sharpening(self, image: np.ndarray, 
                           strength: float = 1.0) -> np.ndarray:
@@ -454,11 +820,11 @@ class ImageEnhancer:
             
             # Save result
             cv2.imwrite(output_path, enhanced)
-            print(f"✓ Processed: {os.path.basename(input_path)}")
+            print(f"[OK] Processed: {os.path.basename(input_path)}")
             return True
-            
+
         except Exception as e:
-            print(f"✗ Error processing {input_path}: {str(e)}")
+            print(f"[ERROR] Error processing {input_path}: {str(e)}")
             return False
     
     def process_folder(self, input_folder: str, output_folder: str, 
@@ -510,8 +876,8 @@ def main():
     enhancer = ImageEnhancer()
     
     # Define paths - ADJUST THESE TO YOUR DATASET LOCATION
-    base_input_path = r"C:\Users\muham\Documents\VIP Indivudal Assignment\Datset"
-    base_output_path = "output"
+    base_input_path = r"C:\Users\muham\Documents\VIP Indivudal Assignment_lama\Datset"
+    base_output_path = r"C:\Users\muham\Documents\VIP Indivudal Assignment_lama\output"
     
     # Hazy images
     hazy_input = os.path.join(base_input_path, "01. Hazy - Raw")
@@ -537,7 +903,7 @@ def main():
     else:
         print(f"Warning: Low-light input folder not found: {lowlight_input}")
     
-    print("\n✓ All processing complete!")
+    print("\n[OK] All processing complete!")
     print(f"Output saved to: {base_output_path}")
 
 

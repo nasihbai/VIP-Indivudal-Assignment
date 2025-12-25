@@ -263,15 +263,15 @@ class ImageEvaluator:
             
             # Check if all files exist
             if not all(os.path.exists(p) for p in [raw_path, gt_path, enhanced_path]):
-                print(f"⚠ Missing file for {filename}, skipping...")
+                print(f"[WARNING] Missing file for {filename}, skipping...")
                 continue
-            
+
             # Evaluate
-            result = self.evaluate_image(raw_path, gt_path, enhanced_path, 
+            result = self.evaluate_image(raw_path, gt_path, enhanced_path,
                                         filename, category)
             if result:
                 results.append(result)
-                print(f"✓ Evaluated: {filename}")
+                print(f"[OK] Evaluated: {filename}")
                 
                 # Generate visualization if requested
                 if visualization_folder:
@@ -337,33 +337,63 @@ class ImageEvaluator:
         """
         # Check if there are any results to save
         if not self.results['hazy'] and not self.results['lowlight']:
-            print(f"\n⚠ No results to save. Skipping Excel file creation.")
+            print(f"\n[WARNING] No results to save. Skipping Excel file creation.")
             return
 
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # Hazy results
-            if self.results['hazy']:
-                df_hazy = pd.DataFrame(self.results['hazy'])
-                df_hazy.to_excel(writer, sheet_name='Hazy_Details', index=False)
+        try:
+            # Ensure output directory exists
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-                summary_hazy = self.generate_summary_report(df_hazy, 'hazy')
-                pd.DataFrame([summary_hazy]).to_excel(writer,
-                                                       sheet_name='Hazy_Summary',
-                                                       index=False)
+            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                # Hazy results
+                if self.results['hazy']:
+                    df_hazy = pd.DataFrame(self.results['hazy'])
+                    df_hazy.to_excel(writer, sheet_name='Hazy_Details', index=False)
 
-            # Low-light results
-            if self.results['lowlight']:
-                df_lowlight = pd.DataFrame(self.results['lowlight'])
-                df_lowlight.to_excel(writer, sheet_name='LowLight_Details',
-                                     index=False)
+                    summary_hazy = self.generate_summary_report(df_hazy, 'hazy')
+                    pd.DataFrame([summary_hazy]).to_excel(writer,
+                                                           sheet_name='Hazy_Summary',
+                                                           index=False)
 
-                summary_lowlight = self.generate_summary_report(df_lowlight,
-                                                                 'lowlight')
-                pd.DataFrame([summary_lowlight]).to_excel(writer,
-                                                          sheet_name='LowLight_Summary',
-                                                          index=False)
+                # Low-light results
+                if self.results['lowlight']:
+                    df_lowlight = pd.DataFrame(self.results['lowlight'])
+                    df_lowlight.to_excel(writer, sheet_name='LowLight_Details',
+                                         index=False)
 
-        print(f"\n✓ Results saved to: {output_path}")
+                    summary_lowlight = self.generate_summary_report(df_lowlight,
+                                                                     'lowlight')
+                    pd.DataFrame([summary_lowlight]).to_excel(writer,
+                                                              sheet_name='LowLight_Summary',
+                                                              index=False)
+
+            print(f"\n[OK] Results saved to: {output_path}")
+
+        except Exception as e:
+            print(f"\n[ERROR] Failed to save Excel file: {str(e)}")
+            print("Attempting to save as CSV instead...")
+
+            # Fallback: Save as CSV files
+            try:
+                csv_dir = Path(output_path).parent / "evaluation_csv"
+                csv_dir.mkdir(parents=True, exist_ok=True)
+
+                if self.results['hazy']:
+                    df_hazy = pd.DataFrame(self.results['hazy'])
+                    df_hazy.to_csv(csv_dir / "hazy_details.csv", index=False)
+                    summary_hazy = self.generate_summary_report(df_hazy, 'hazy')
+                    pd.DataFrame([summary_hazy]).to_csv(csv_dir / "hazy_summary.csv", index=False)
+
+                if self.results['lowlight']:
+                    df_lowlight = pd.DataFrame(self.results['lowlight'])
+                    df_lowlight.to_csv(csv_dir / "lowlight_details.csv", index=False)
+                    summary_lowlight = self.generate_summary_report(df_lowlight, 'lowlight')
+                    pd.DataFrame([summary_lowlight]).to_csv(csv_dir / "lowlight_summary.csv", index=False)
+
+                print(f"[OK] Results saved as CSV to: {csv_dir}")
+
+            except Exception as e2:
+                print(f"[ERROR] Failed to save CSV files: {str(e2)}")
 
 
 def main():
@@ -372,20 +402,20 @@ def main():
     """
     # Initialize evaluator
     evaluator = ImageEvaluator()
-    
+
     # Define paths - ADJUST THESE TO YOUR FOLDER STRUCTURE
-    base_dataset = r"C:\Users\muham\Documents\VIP Indivudal Assignment\Datset"
-    base_output = "output"
+    base_dataset = r"C:\Users\muham\Documents\VIP Indivudal Assignment_lama\Datset"
+    base_output = r"C:\Users\muham\Documents\VIP Indivudal Assignment_lama\output"
     
     # Hazy images paths
     hazy_raw = os.path.join(base_dataset, "01. Hazy - Raw")
-    hazy_gt = os.path.join(base_dataset, "01. Hazy - Enhanced (GT)")
+    hazy_gt = os.path.join(base_dataset, "01..Hazy - Enhanced (GT)")
     hazy_enhanced = os.path.join(base_output, "hazy-student-enhanced")
     hazy_viz = os.path.join(base_output, "visualizations", "hazy")
-    
+
     # Low-light images paths
     lowlight_raw = os.path.join(base_dataset, "02. Low Light - Raw")
-    lowlight_gt = os.path.join(base_dataset, "02. Low Light - Enhanced (GT)")
+    lowlight_gt = os.path.join(base_dataset, "02.. Low Light - Enhanced (GT)")
     lowlight_enhanced = os.path.join(base_output, "lowlight-student-enhanced")
     lowlight_viz = os.path.join(base_output, "visualizations", "lowlight")
     
@@ -434,9 +464,9 @@ def main():
     # Save all results to Excel
     excel_path = os.path.join(base_output, "evaluation_results.xlsx")
     evaluator.save_results_to_excel(excel_path)
-    
+
     print("\n" + "="*60)
-    print("✓ Evaluation complete!")
+    print("[OK] Evaluation complete!")
     print("="*60)
 
 

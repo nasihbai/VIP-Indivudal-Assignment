@@ -296,21 +296,59 @@ def batch_create_reports(raw_folder: str, gt_folder: str,
 def print_summary_table(summary_dict: dict):
     """
     Print a formatted summary table.
-    
+
     Args:
         summary_dict: Dictionary with summary statistics
     """
     print("\n" + "="*70)
     print(f"{'Metric':<35} {'Value':>15}")
     print("="*70)
-    
+
     for key, value in summary_dict.items():
         if isinstance(value, float):
             print(f"{key:<35} {value:>15.4f}")
         else:
             print(f"{key:<35} {str(value):>15}")
-    
+
     print("="*70 + "\n")
+
+
+def get_sparse_neighbor(p: int, n: int, m: int):
+    """
+    Get the neighbors of pixel p in a flattened image for sparse matrix construction.
+
+    This function returns the 4-connected neighbors (up, down, left, right) of a pixel
+    at position p in a flattened n x m image array.
+
+    Args:
+        p: pixel position in flattened array (0 to n*m-1)
+        n: number of rows in the image
+        m: number of columns in the image
+
+    Returns:
+        dict: Dictionary mapping neighbor positions to (row, col, is_horizontal) tuples
+              where is_horizontal is True for left/right neighbors, False for up/down
+    """
+    i, j = p // m, p % m
+    neighbors = {}
+
+    # Right neighbor
+    if j + 1 < m:
+        neighbors[p + 1] = (i, j, True)
+
+    # Left neighbor
+    if j - 1 >= 0:
+        neighbors[p - 1] = (i, j, True)
+
+    # Down neighbor
+    if i + 1 < n:
+        neighbors[p + m] = (i, j, False)
+
+    # Up neighbor
+    if i - 1 >= 0:
+        neighbors[p - m] = (i, j, False)
+
+    return neighbors
 
 
 if __name__ == "__main__":
