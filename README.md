@@ -92,6 +92,8 @@ dataset/
 
 ### Step 1: Run Image Enhancement
 
+
+Before running the image 
 ```bash
 python enhancement.py
 ```
